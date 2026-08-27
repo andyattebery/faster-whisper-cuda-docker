@@ -1,10 +1,14 @@
 services:
   wyoming-whisper-cuda:
     container_name: wyoming-whisper-cuda
+    # With both `image:` and `build:` set, `docker compose up` builds locally when
+    # the image is not already present. Use `docker compose pull` to fetch the
+    # published image instead, or `up --build` to force a rebuild.
+    image: ghcr.io/andyattebery/faster-whisper-cuda-docker:latest
     build:
       context: ./docker/cuda
-      dockerfile: Dockerfile    
-    command: --model medium-int8 --language en --beam-size 5
+      dockerfile: Dockerfile
+    command: --model turbo --compute-type int8_float16 --language en --beam-size 5 --vad-filter
     volumes:
       - /path/to/your/data/directory:/data
     restart: unless-stopped
