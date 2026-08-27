@@ -1,0 +1,7 @@
+# agent working notes — never published
+tasks/
+plans/
+
+# python bytecode
+__pycache__/
+*.pyc

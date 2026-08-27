@@ -1,0 +1,104 @@
+name: build
+
+# linux/amd64 only, deliberately: ctranslate2's manylinux aarch64 wheels are
+# built WITHOUT CUDA, so an arm64 image would build cleanly and then never
+# touch the GPU.
+
+on:
+  push:
+    branches: [master]
+    paths-ignore:
+      - 'README.md'
+      - 'tasks/**'
+      - 'plans/**'
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  packages: write
+
+# Single source of truth for both the image tags and the build args, so a tag
+# can never claim a version the image doesn't contain. The smoke test asserts
+# the two actually agree.
+env:
+  WHISPER_VERSION: '3.6.0'
+  CUDA_VERSION: '12.9.2'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      # The CUDA base is ~3.9GB (~4.4GB built); runners are tight on disk.
+      - uses: jlumbroso/free-disk-space@v1.3.1
+        with:
+          tool-cache: true
+          large-packages: false   # slow, and not what's eating the disk
+
+      - uses: docker/setup-buildx-action@v4
+
+      # Skipped on pull_request: forks have no packages:write, and PRs don't push.
+      - if: github.event_name != 'pull_request'
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=raw,value=${{ env.WHISPER_VERSION }}-cuda${{ env.CUDA_VERSION }}
+            type=raw,value=${{ env.WHISPER_VERSION }}
+            type=raw,value=latest
+            type=sha
+
+      # Pass 1: build into the local daemon so the smoke test can run it.
+      - uses: docker/build-push-action@v7
+        with:
+          context: ./docker/cuda
+          platforms: linux/amd64
+          load: true
+          tags: smoketest:latest
+          build-args: |
+            CUDA_VERSION=${{ env.CUDA_VERSION }}
+            WYOMING_WHISPER_VERSION=${{ env.WHISPER_VERSION }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # CI has no NVIDIA hardware, so it cannot verify CUDA works. It verifies
+      # what is checkable without a GPU and has actually broken before: the
+      # version floors, the absence of torch, and the exact set of CUDA
+      # libraries ctranslate2 dlopens (which gates the non-cudnn base image).
+      # Piped in via stdin so the same script runs locally against any image.
+      - name: Smoke test
+        env:
+          WANT_WHISPER: ${{ env.WHISPER_VERSION }}
+          WANT_CUDA: ${{ env.CUDA_VERSION }}
+        run: |
+          docker run --rm -i \
+            -e WANT_WHISPER -e WANT_CUDA \
+            --entrypoint python3 smoketest:latest - < ci/smoke-test.py
+
+      # Pass 2: same layers, now a cache hit, pushed under the real tags.
+      - if: github.event_name != 'pull_request'
+        uses: docker/build-push-action@v7
+        with:
+          context: ./docker/cuda
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            CUDA_VERSION=${{ env.CUDA_VERSION }}
+            WYOMING_WHISPER_VERSION=${{ env.WHISPER_VERSION }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
